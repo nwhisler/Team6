@@ -1,5 +1,6 @@
 package org.example;
 
+import com.google.common.collect.Iterables;
 import scala.Tuple2;
 
 import org.apache.spark.api.java.JavaPairRDD;
@@ -11,10 +12,12 @@ import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.Dataset;
 
 import java.util.*;
+import java.util.regex.Pattern;
 
 import org.apache.spark.sql.SparkSession;
 
 public class RedditNLP {
+    private static final Pattern SPACE = Pattern.compile("\\s+");
 
 
     public static void main(String args[]) throws Exception {
@@ -82,16 +85,47 @@ public class RedditNLP {
             return map;
         });
 
-        Iterator<HashMap<String,Double>> result = tf_result.toLocalIterator();
+//        Iterator<HashMap<String,Double>> result = tf_result.toLocalIterator();
+//
+//        while(result.hasNext()) {
+//            HashMap<String,Double> map = result.next();
+//            Set<String> keys = map.keySet();
+//            for(String key : keys) {
+//                System.out.println(key + " " + map.get(key));
+//            }
+//        }
 
-        while(result.hasNext()) {
-            HashMap<String,Double> map = result.next();
-            Set<String> keys = map.keySet();
-            for(String key : keys) {
-                System.out.println(key + " " + map.get(key));
+        // Calculating IDF = log10(N/ni)
+        // N = number of articles
+        // ni = number of times term i appears within articles in corpus N
+        long numCorpus = corpus_zipped.count();
+        JavaPairRDD<String, String> tokenDocFlatMap = tokens.flatMapValues(s -> Arrays.asList(s).iterator()).mapToPair(s -> s.swap());
+        JavaPairRDD<String, Iterable<String>> reducedTokenDocFlatMap = tokenDocFlatMap.groupByKey();
+        JavaPairRDD<String, Double> IDF = reducedTokenDocFlatMap.mapToPair(s -> {
+            int ni = Iterables.size(s._2());
+            double idf = Math.log((double) numCorpus / ni);
+            return new Tuple2<>(s._1(), idf);
+        });
+
+        // Calculating TFIDF = TFi * IDFi
+        // TFi is the TF value per word
+        // IDFi is the IDF value per word
+        JavaPairRDD<String, Tuple2<String, Double>> TF = tf_result.flatMapToPair(s -> {
+            List<Tuple2<String, Tuple2<String, Double>>> results = new ArrayList<>();
+            for(String key : s.keySet()) {
+                String token = SPACE.split(key)[0];
+                String docId = SPACE.split(key)[1];
+                results.add(new Tuple2<>(token, new Tuple2<>(docId, s.get(key))));
             }
-        }
+            return results.iterator();
+        });
+        JavaPairRDD<String, Double> TFIDF = IDF.join(TF).mapToPair(s ->  new Tuple2<>(s._1() + " " + s._2()._2()._1(), s._2()._1() * s._2()._2()._2()));
 
+        Iterator<Tuple2<String, Double>> TFIDFIterator = TFIDF.toLocalIterator();
+
+        while(TFIDFIterator.hasNext()) {
+            System.out.println(TFIDFIterator.next()._1() + " " + TFIDFIterator.next()._2());
+        }
 
         spark.stop();
 
