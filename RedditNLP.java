@@ -5,16 +5,16 @@ import scala.Tuple2;
 
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
-import org.apache.spark.sql.SparkSession;
 
+import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.functions;
 import org.apache.spark.sql.Row;
-import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.Dataset;
+
+import org.apache.spark.ml.feature.StringIndexer;
 
 import java.util.*;
 import java.util.regex.Pattern;
-
-import org.apache.spark.sql.SparkSession;
 
 public class RedditNLP {
     private static final Pattern SPACE = Pattern.compile("\\s+");
@@ -30,12 +30,32 @@ public class RedditNLP {
 
         SparkSession spark = SparkSession
                 .builder()
-                .appName("RedditNLP").master("local")
+                .appName("RedditNLP")
+                .master("local")
                 .getOrCreate();
 
         Dataset<Row> df = spark.read().parquet(args[0]);
-        Dataset<Row> df_partial = df.select("id","text");
-        JavaRDD<Row> rows = df_partial.toJavaRDD();
+        Dataset<Row> df_partial = df.select("id", "text", "date", "subreddit");
+
+        df_partial = df_partial
+                .withColumn("year", functions.year(df_partial.col("date")))
+                .withColumn("month", functions.month(df_partial.col("date")))
+                .withColumn("day", functions.dayofmonth(df_partial.col("date")))
+                .withColumn("hour", functions.hour(df_partial.col("date")));
+
+        // probably need to add org.apache.spark.ml to the pom.xml in the maven project, but afaik is the only way to easily index the subreddits.
+        /**
+         * <dependency>
+         *      <groupId>org.apache.spark</groupId>
+         *      <artifactId>spark-mllib_2.12</artifactId>
+         *      <version>2.4.3</version>
+         * </dependency>
+         */
+        StringIndexer indexer = new StringIndexer()
+                .setInputCol("subreddit")
+                .setOutputCol("subredditIndex");
+        Dataset<Row> indexed_df = indexer.fit(df_partial).transform(df_partial);
+        JavaRDD<Row> rows = indexed_df.select("id", "text", "year", "month", "day", "hour", "subredditIndex").toJavaRDD();
         JavaPairRDD<String,String[]> tokens = rows.mapToPair(s -> new Tuple2(s.get(0),String.valueOf(s.get(1)).replaceAll("\\?\\!\\.\\,\\-","").split(" ")));
         JavaRDD<HashMap<String,Double>> tf_mapper = tokens.map(s -> {
             String document_id = s._1();
@@ -121,11 +141,17 @@ public class RedditNLP {
         });
         JavaPairRDD<String, Double> TFIDF = IDF.join(TF).mapToPair(s ->  new Tuple2<>(s._1() + " " + s._2()._2()._1(), s._2()._1() * s._2()._2()._2()));
 
-        Iterator<Tuple2<String, Double>> TFIDFIterator = TFIDF.toLocalIterator();
+        // Commented out and replaced with outputting to a file due to memory issues when running on cs machine.
 
-        while(TFIDFIterator.hasNext()) {
-            System.out.println(TFIDFIterator.next()._1() + " " + TFIDFIterator.next()._2());
-        }
+        // Iterator<Tuple2<String, Double>> TFIDFIterator = TFIDF.toLocalIterator();
+
+        // while(TFIDFIterator.hasNext()) {
+        //     System.out.println(TFIDFIterator.next()._1() + " " + TFIDFIterator.next()._2());
+        // }
+
+        // save as text files.
+        TFIDF.saveAsTextFile("/ProjectOutput"); 
+
 
         spark.stop();
 

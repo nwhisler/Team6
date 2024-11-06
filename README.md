@@ -12,14 +12,3 @@ Schedule:
 | 12 | Nick/Jakob | Generate vectors and setup Random Forest in Spark | 
 | 12 | Ian/Justin | Tune Hyperparameters in Spark | 
 | 13 | Everyone | Write final report |
-
-
-Helpful Setup Commands:
-```
-start.dfs.sh
-start-master.sh
-start-workers.sh
-start-yarn.sh
-```
-
-
