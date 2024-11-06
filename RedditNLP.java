@@ -31,7 +31,7 @@ public class RedditNLP {
         SparkSession spark = SparkSession
                 .builder()
                 .appName("RedditNLP")
-                .master("spark://baghdad.cs.colostate.edu:30136")
+                .master("local")
                 .getOrCreate();
 
         Dataset<Row> df = spark.read().parquet(args[0]);
