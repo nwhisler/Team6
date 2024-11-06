@@ -141,16 +141,27 @@ public class RedditNLP {
         });
         JavaPairRDD<String, Double> TFIDF = IDF.join(TF).mapToPair(s ->  new Tuple2<>(s._1() + " " + s._2()._2()._1(), s._2()._1() * s._2()._2()._2()));
 
-        // Commented out and replaced with outputting to a file due to memory issues when running on cs machine.
+        JavaPairRDD<String, Double> docTfidfSums = TFIDF
+                .mapToPair(entry -> {
+                    String[] parts = entry._1().split(" ");
+                    String docID = parts[1];
+                    return new Tuple2<>(docID, entry._2());
+                })
+                .reduceByKey(Double::sum);
+
+        // save as text files.
+        docTfidfSums.saveAsTextFile("/ProjectOutput");
+        // TFIDF.saveAsTextFile("/ProjectOutput");
+
+        // Commented out and replaced with outputting to a file due to memory issues
+        // when running on cs machine.
 
         // Iterator<Tuple2<String, Double>> TFIDFIterator = TFIDF.toLocalIterator();
 
         // while(TFIDFIterator.hasNext()) {
-        //     System.out.println(TFIDFIterator.next()._1() + " " + TFIDFIterator.next()._2());
+        // System.out.println(TFIDFIterator.next()._1() + " " +
+        // TFIDFIterator.next()._2());
         // }
-
-        // save as text files.
-        TFIDF.saveAsTextFile("/ProjectOutput"); 
 
 
         spark.stop();
