@@ -1,6 +1,8 @@
 package org.example;
 
 import com.google.common.collect.Iterables;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import scala.Tuple2;
 
 import org.apache.spark.api.java.JavaPairRDD;
@@ -11,7 +13,12 @@ import org.apache.spark.sql.functions;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.Dataset;
 
+import org.apache.spark.mllib.regression.LabeledPoint;
 import org.apache.spark.ml.feature.StringIndexer;
+import org.apache.spark.mllib.linalg.Vectors;
+
+import org.apache.spark.sql.types.DoubleType;
+import org.apache.spark.sql.types.StructType;
 
 import java.util.*;
 import java.util.regex.Pattern;
@@ -35,7 +42,7 @@ public class RedditNLP {
                 .getOrCreate();
 
         Dataset<Row> df = spark.read().parquet(args[0]);
-        Dataset<Row> df_partial = df.select("id", "text", "date", "subreddit");
+        Dataset<Row> df_partial = df.select("id", "text", "date", "subreddit", "score", "language_score", "token_count");
 
         df_partial = df_partial
                 .withColumn("year", functions.year(df_partial.col("date")))
@@ -55,7 +62,7 @@ public class RedditNLP {
                 .setInputCol("subreddit")
                 .setOutputCol("subredditIndex");
         Dataset<Row> indexed_df = indexer.fit(df_partial).transform(df_partial);
-        JavaRDD<Row> rows = indexed_df.select("id", "text", "year", "month", "day", "hour", "subredditIndex").toJavaRDD();
+        JavaRDD<Row> rows = indexed_df.select("id", "text", "year", "month", "day", "hour", "subredditIndex", "score", "language_score", "token_count").toJavaRDD();
         JavaPairRDD<String,String[]> tokens = rows.mapToPair(s -> new Tuple2(s.get(0),String.valueOf(s.get(1)).replaceAll("\\?\\!\\.\\,\\-","").split(" ")));
         JavaRDD<HashMap<String,Double>> tf_mapper = tokens.map(s -> {
             String document_id = s._1();
@@ -149,19 +156,44 @@ public class RedditNLP {
                 })
                 .reduceByKey(Double::sum);
 
-        // save as text files.
-        docTfidfSums.saveAsTextFile("/ProjectOutput");
-        // TFIDF.saveAsTextFile("/ProjectOutput");
+        JavaRDD<Double> tfidf_sums = docTfidfSums.map(s -> s._2());
 
-        // Commented out and replaced with outputting to a file due to memory issues
-        // when running on cs machine.
+//        Dataset<Row> tfidf_df = spark.createDataFrame(tfidf_sums.rdd(), StructType.class).toDF("tfidf");
+//        df_partial = df_partial.withColumn("tfidf", tfidf_df.col("tfidf"));
+        df_partial = df_partial.withColumn("tfidf", functions.lit(0.0));
 
-        // Iterator<Tuple2<String, Double>> TFIDFIterator = TFIDF.toLocalIterator();
+        rows = df_partial.select("score", "year", "month", "day", "hour", "tfidf", "language_score", "token_count").toJavaRDD();
+        JavaPairRDD<Double,double[]> feature_pairs = rows.mapToPair(s -> {
+            Long value0 = (long) s.get(0);
+            double label = value0.doubleValue();
+            Integer value1 = (int) s.get(1);
+            double year = value1.doubleValue();
+            Integer value2 = (int) s.get(2);
+            double month = value2.doubleValue();
+            Integer value3 = (int) s.get(3);
+            double day = value3.doubleValue();
+            Integer value4 = (int) s.get(4);
+            double hour = value4.doubleValue();
+            double tfidf = (double) s.get(5);
+            double language_score = (double) s.get(6);
+            Long value7 = (long) s.get(7);
+            double token_count = value7.doubleValue();
 
-        // while(TFIDFIterator.hasNext()) {
-        // System.out.println(TFIDFIterator.next()._1() + " " +
-        // TFIDFIterator.next()._2());
-        // }
+            double[] features = {year,month,day,hour,tfidf,language_score,token_count};
+
+            return new Tuple2(Double.valueOf(label),features);
+
+        });
+
+        JavaRDD<LabeledPoint> vectors = feature_pairs.map(s -> {
+            return new LabeledPoint(s._1().doubleValue(), Vectors.dense(s._2()));
+        });
+
+        Iterator<LabeledPoint> vector_result = vectors.toLocalIterator();
+
+        while(vector_result.hasNext()) {
+            System.out.println(vector_result.next().toString());
+        }
 
 
         spark.stop();
