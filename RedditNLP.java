@@ -192,9 +192,7 @@ public class RedditNLP {
         Dataset<Row> trainingData = splits[0];
         Dataset<Row> testData = splits[1];
 
-        RandomForestRegressor rf = new RandomForestRegressor()
-                .setLabelCol("label")
-                .setFeaturesCol("features")
+        RandomForestRegressor rf = new RandomForestRegressor().setLabelCol("label").setFeaturesCol("features")
                 .setNumTrees(100)
                 .setMaxDepth(10)
                 .setMaxBins(32);
@@ -203,10 +201,8 @@ public class RedditNLP {
 
         Dataset<Row> predictions = model.transform(testData);
 
-        RegressionEvaluator evaluator = new RegressionEvaluator()
-                .setLabelCol("label")
-                .setPredictionCol("prediction")
-                .setMetricName("rmse");
+        RegressionEvaluator evaluator = new RegressionEvaluator().setLabelCol("label").setPredictionCol("prediction").setMetricName("rmse");
+        
         double rmse = evaluator.evaluate(predictions);
 
         Dataset<Row> results = predictions.select("label", "prediction");
