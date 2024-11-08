@@ -1,35 +1,35 @@
 package org.example;
 
-import com.google.common.collect.Iterables;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
-import scala.Tuple2;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
-
+import org.apache.spark.ml.evaluation.RegressionEvaluator;
+import org.apache.spark.ml.feature.LabeledPoint;
+import org.apache.spark.ml.feature.StringIndexer;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.Dataset;
+import org.apache.spark.ml.linalg.Vectors;
+import org.apache.spark.ml.regression.RandomForestRegressionModel;
+import org.apache.spark.ml.regression.RandomForestRegressor;
 
-import org.apache.spark.mllib.regression.LabeledPoint;
-import org.apache.spark.ml.feature.StringIndexer;
-import org.apache.spark.mllib.linalg.Vectors;
+import com.google.common.collect.Iterables;
 
-import org.apache.spark.sql.types.DoubleType;
-import org.apache.spark.sql.types.StructType;
-
-import java.util.*;
-import java.util.regex.Pattern;
+import scala.Tuple2;
 
 public class RedditNLP {
     private static final Pattern SPACE = Pattern.compile("\\s+");
 
-
     public static void main(String args[]) throws Exception {
 
-        if(args.length < 1) {
+        if (args.length < 1) {
 
             System.exit(1);
 
@@ -41,8 +41,11 @@ public class RedditNLP {
                 .master("local")
                 .getOrCreate();
 
-        Dataset<Row> df = spark.read().parquet(args[0]);
+        // changed to load all the parquet files in a directory input path.
+        String inputPath = "/spark-input/*.parquet";
+        Dataset<Row> df = spark.read().parquet(inputPath);
         Dataset<Row> df_partial = df.select("id", "text", "date", "subreddit", "score", "language_score", "token_count");
+        df_partial.cache();
 
         df_partial = df_partial
                 .withColumn("year", functions.year(df_partial.col("date")))
@@ -50,20 +53,16 @@ public class RedditNLP {
                 .withColumn("day", functions.dayofmonth(df_partial.col("date")))
                 .withColumn("hour", functions.hour(df_partial.col("date")));
 
-        // probably need to add org.apache.spark.ml to the pom.xml in the maven project, but afaik is the only way to easily index the subreddits.
-        /**
-         * <dependency>
-         *      <groupId>org.apache.spark</groupId>
-         *      <artifactId>spark-mllib_2.12</artifactId>
-         *      <version>2.4.3</version>
-         * </dependency>
-         */
         StringIndexer indexer = new StringIndexer()
                 .setInputCol("subreddit")
                 .setOutputCol("subredditIndex");
         Dataset<Row> indexed_df = indexer.fit(df_partial).transform(df_partial);
+        indexed_df.cache();
+
         JavaRDD<Row> rows = indexed_df.select("id", "text", "year", "month", "day", "hour", "subredditIndex", "score", "language_score", "token_count").toJavaRDD();
+
         JavaPairRDD<String,String[]> tokens = rows.mapToPair(s -> new Tuple2(s.get(0),String.valueOf(s.get(1)).replaceAll("\\?\\!\\.\\,\\-","").split(" ")));
+
         JavaRDD<HashMap<String,Double>> tf_mapper = tokens.map(s -> {
             String document_id = s._1();
             String[] current_tokens = s._2();
@@ -87,6 +86,7 @@ public class RedditNLP {
             return tf;
 
         });
+
 
         JavaRDD<Integer> corpus = tokens.map(s -> s._2().length);
 
@@ -160,42 +160,72 @@ public class RedditNLP {
 
 //        Dataset<Row> tfidf_df = spark.createDataFrame(tfidf_sums.rdd(), StructType.class).toDF("tfidf");
 //        df_partial = df_partial.withColumn("tfidf", tfidf_df.col("tfidf"));
-        df_partial = df_partial.withColumn("tfidf", functions.lit(0.0));
+        JavaPairRDD<String, Row> rowsWithId = df_partial.select("id", "score", "year", "month", "day", "hour", "language_score", "token_count")
+                .toJavaRDD()
+                .mapToPair(row -> new Tuple2<>(row.getString(0), row));
 
-        rows = df_partial.select("score", "year", "month", "day", "hour", "tfidf", "language_score", "token_count").toJavaRDD();
-        JavaPairRDD<Double,double[]> feature_pairs = rows.mapToPair(s -> {
-            Long value0 = (long) s.get(0);
-            double label = value0.doubleValue();
-            Integer value1 = (int) s.get(1);
-            double year = value1.doubleValue();
-            Integer value2 = (int) s.get(2);
-            double month = value2.doubleValue();
-            Integer value3 = (int) s.get(3);
-            double day = value3.doubleValue();
-            Integer value4 = (int) s.get(4);
-            double hour = value4.doubleValue();
-            double tfidf = (double) s.get(5);
-            double language_score = (double) s.get(6);
-            Long value7 = (long) s.get(7);
-            double token_count = value7.doubleValue();
+        JavaPairRDD<String, Tuple2<Row, Double>> joinedRows = rowsWithId.join(docTfidfSums);
 
-            double[] features = {year,month,day,hour,tfidf,language_score,token_count};
+        JavaPairRDD<Double, double[]> feature_pairs = joinedRows.mapToPair(s -> {
+            Row row = s._2()._1();
+            double tfidf = s._2()._2();
 
-            return new Tuple2(Double.valueOf(label),features);
+            double label = (double) row.getLong(1);
+            double year = (double) row.getInt(2);
+            double month = (double) row.getInt(3);
+            double day = (double) row.getInt(4);
+            double hour = (double) row.getInt(5);
+            double language_score = (double) row.getDouble(6);
+            double token_count = (double) row.getLong(7);
 
+            double[] features = {year, month, day, hour, tfidf, language_score, token_count};
+            return new Tuple2<>(label, features);
         });
 
-        JavaRDD<LabeledPoint> vectors = feature_pairs.map(s -> {
-            return new LabeledPoint(s._1().doubleValue(), Vectors.dense(s._2()));
+        JavaRDD<LabeledPoint> vectors = feature_pairs.map(s -> 
+            new LabeledPoint(s._1(), Vectors.dense(s._2()))
+        );
+
+        Dataset<Row> labeledData = spark.createDataFrame(vectors, LabeledPoint.class);
+
+        Dataset<Row>[] splits = labeledData.randomSplit(new double[]{0.8, 0.2}, 435);
+        Dataset<Row> trainingData = splits[0];
+        Dataset<Row> testData = splits[1];
+
+        RandomForestRegressor rf = new RandomForestRegressor()
+                .setLabelCol("label")
+                .setFeaturesCol("features")
+                .setNumTrees(100)
+                .setMaxDepth(10)
+                .setMaxBins(32);
+
+        RandomForestRegressionModel model = rf.fit(trainingData);
+
+        Dataset<Row> predictions = model.transform(testData);
+
+        RegressionEvaluator evaluator = new RegressionEvaluator()
+                .setLabelCol("label")
+                .setPredictionCol("prediction")
+                .setMetricName("rmse");
+        double rmse = evaluator.evaluate(predictions);
+
+        Dataset<Row> results = predictions.select("label", "prediction");
+
+        JavaRDD<String> output = results.toJavaRDD().map(row -> {
+            double actualScore = row.getDouble(0);
+            double predictedScore = row.getDouble(1);
+            return actualScore + "," + predictedScore;
         });
+        System.out.println("RMSE for the model: " + rmse);
 
-        Iterator<LabeledPoint> vector_result = vectors.toLocalIterator();
+        output.saveAsTextFile("/ProjectOutput/");
 
-        while(vector_result.hasNext()) {
-            System.out.println(vector_result.next().toString());
-        }
+        // Iterator<LabeledPoint> vector_result = vectors.toLocalIterator();
 
-
+        // while(vector_result.hasNext()) {
+        //     System.out.println(vector_result.next().toString());
+        // }
+        
         spark.stop();
 
     }
