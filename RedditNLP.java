@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import org.apache.spark.sql.types.StructType;
+
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.ml.evaluation.RegressionEvaluator;
@@ -14,6 +16,7 @@ import org.apache.spark.ml.feature.LabeledPoint;
 import org.apache.spark.ml.feature.StringIndexer;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.functions;
 import org.apache.spark.ml.linalg.Vectors;
@@ -43,7 +46,7 @@ public class RedditNLP {
 
         // changed to load all the parquet files in a directory input path.
         String inputPath = "/spark-input/*.parquet";
-        Dataset<Row> df = spark.read().parquet(inputPath);
+        Dataset<Row> df = spark.read().parquet(args[0]);
         Dataset<Row> df_partial = df.select("id", "text", "date", "subreddit", "score", "language_score", "token_count");
         df_partial.cache();
 
@@ -112,15 +115,6 @@ public class RedditNLP {
             return map;
         });
 
-//        Iterator<HashMap<String,Double>> result = tf_result.toLocalIterator();
-//
-//        while(result.hasNext()) {
-//            HashMap<String,Double> map = result.next();
-//            Set<String> keys = map.keySet();
-//            for(String key : keys) {
-//                System.out.println(key + " " + map.get(key));
-//            }
-//        }
 
         // Calculating IDF = log10(N/ni)
         // N = number of articles
@@ -158,8 +152,6 @@ public class RedditNLP {
 
         JavaRDD<Double> tfidf_sums = docTfidfSums.map(s -> s._2());
 
-//        Dataset<Row> tfidf_df = spark.createDataFrame(tfidf_sums.rdd(), StructType.class).toDF("tfidf");
-//        df_partial = df_partial.withColumn("tfidf", tfidf_df.col("tfidf"));
         JavaPairRDD<String, Row> rowsWithId = df_partial.select("id", "score", "year", "month", "day", "hour", "language_score", "token_count")
                 .toJavaRDD()
                 .mapToPair(row -> new Tuple2<>(row.getString(0), row));
@@ -182,8 +174,8 @@ public class RedditNLP {
             return new Tuple2<>(label, features);
         });
 
-        JavaRDD<LabeledPoint> vectors = feature_pairs.map(s -> 
-            new LabeledPoint(s._1(), Vectors.dense(s._2()))
+        JavaRDD<LabeledPoint> vectors = feature_pairs.map(s ->
+                new LabeledPoint(s._1(), Vectors.dense(s._2()))
         );
 
         Dataset<Row> labeledData = spark.createDataFrame(vectors, LabeledPoint.class);
@@ -202,7 +194,7 @@ public class RedditNLP {
         Dataset<Row> predictions = model.transform(testData);
 
         RegressionEvaluator evaluator = new RegressionEvaluator().setLabelCol("label").setPredictionCol("prediction").setMetricName("rmse");
-        
+
         double rmse = evaluator.evaluate(predictions);
 
         Dataset<Row> results = predictions.select("label", "prediction");
@@ -212,16 +204,34 @@ public class RedditNLP {
             double predictedScore = row.getDouble(1);
             return actualScore + "," + predictedScore;
         });
-        System.out.println("RMSE for the model: " + rmse);
 
-        output.saveAsTextFile("/ProjectOutput/");
+        //Baseline Predictions
+        JavaRDD<Row> output_labels = indexed_df.select("score").toJavaRDD();
+        JavaRDD<Integer> labels = output_labels.map(s -> Long.valueOf(s.getLong(0)).intValue());
+        Integer labels_sum = labels.reduce((value1, value2) -> value1 + value2);
+        Double label_count = Long.valueOf(labels.count()).doubleValue();
+        double y_mean = labels_sum / label_count;
+        JavaRDD<LabeledPoint> baseline_vectors = labels.map(s -> {
+            double[] values = {0};
+            return new LabeledPoint(s.doubleValue(), Vectors.dense(values));
+        });
+        Dataset<Row> baselineData = spark.createDataFrame(baseline_vectors, LabeledPoint.class);
+        baselineData = baselineData.withColumn("prediction", functions.lit(y_mean));
+
+        double baseline_rmse = evaluator.evaluate(baselineData);
+
+        // Compaprison
+        System.out.println("RMSE for the model: " + rmse);
+        System.out.println("RMSE for baseline model: " + baseline_rmse);
+
+//        output.saveAsTextFile("/ProjectOutput/");
 
         // Iterator<LabeledPoint> vector_result = vectors.toLocalIterator();
 
         // while(vector_result.hasNext()) {
         //     System.out.println(vector_result.next().toString());
         // }
-        
+
         spark.stop();
 
     }
