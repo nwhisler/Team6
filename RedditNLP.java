@@ -90,7 +90,6 @@ public class RedditNLP {
 
         });
 
-
         JavaRDD<Integer> corpus = tokens.map(s -> s._2().length);
 
         JavaPairRDD<Integer, Long> corpus_zipped = corpus.zipWithIndex();
@@ -115,6 +114,25 @@ public class RedditNLP {
             return map;
         });
 
+        // Reads in a different parquet and only saves an RDD of the format (Token, Score)
+        Dataset<Row> df2 = spark.read().parquet(args[1]);
+        Dataset<Row> df_partial2 = df.select("text", "score");
+        df_partial.cache();
+
+        JavaRDD<Row> rows2 = df_partial2.select("text", "score").toJavaRDD();
+
+        JavaPairRDD<String,Long> tokensScore = rows2.flatMapToPair(s -> {
+            List<Tuple2<String, Long>> results = new ArrayList<>();
+            for(String word : String.valueOf(s.get(0)).replaceAll("\\?\\!\\.\\,\\-","").split(" ")) {
+                results.add(new Tuple2<>(word, s.getLong(1)));
+            }
+            return results.iterator();
+        });
+
+        // Combines this RDD into a single RDD that only has a single Token and the average score associated with that token
+        JavaPairRDD<String, Tuple2<Integer, Long>> tokenCountScore = tokensScore.mapToPair(s -> new Tuple2<>(s._1(), new Tuple2<>(1,s._2())));
+        JavaPairRDD<String, Double> tokenAveScore = tokenCountScore.reduceByKey((a, b) -> new Tuple2<>(a._1() + b._1(), a._2() + b._2()))
+                .mapToPair(s -> new Tuple2<>(s._1(), ((double) s._2()._2())/((double) s._2()._1())));
 
         // Calculating IDF = log10(N/ni)
         // N = number of articles
@@ -150,17 +168,30 @@ public class RedditNLP {
                 })
                 .reduceByKey(Double::sum);
 
-        JavaRDD<Double> tfidf_sums = docTfidfSums.map(s -> s._2());
+        // Do the same thing as TFIDF except for TFIDF multiplied by Score
+        JavaPairRDD<String, Double> TFIDFScore = TFIDF.mapToPair(s -> {
+            String[] parts = s._1().split(" ");
+            return new Tuple2<>(parts[0], new Tuple2<>(parts[1], s._2()));
+        }).join(tokenAveScore).mapToPair(s -> new Tuple2<>(s._1() + " " + s._2()._1()._1(), s._2()._1()._2() * s._2()._2()));
+        // TFIDFScore.saveAsTextFile("CS435Project/TFIDFScore");
+        JavaPairRDD<String, Double> docTfidfScoreSums = TFIDFScore.mapToPair(entry -> {
+                    String[] parts = entry._1().split(" ");
+                    String docID = parts[1];
+                    return new Tuple2<>(docID, entry._2());
+                }).reduceByKey(Double::sum);
+
+
 
         JavaPairRDD<String, Row> rowsWithId = df_partial.select("id", "score", "year", "month", "day", "hour", "language_score", "token_count")
                 .toJavaRDD()
                 .mapToPair(row -> new Tuple2<>(row.getString(0), row));
 
-        JavaPairRDD<String, Tuple2<Row, Double>> joinedRows = rowsWithId.join(docTfidfSums);
+        JavaPairRDD<String, Tuple2<Tuple2<Row, Double>, Double>> joinedRows = rowsWithId.join(docTfidfSums).join(docTfidfScoreSums);
 
         JavaPairRDD<Double, double[]> feature_pairs = joinedRows.mapToPair(s -> {
-            Row row = s._2()._1();
-            double tfidf = s._2()._2();
+            Row row = s._2()._1()._1();
+            double tfidf = s._2()._1()._2();
+            double tfidfScore = s._2()._2();
 
             double label = (double) row.getLong(1);
             double year = (double) row.getInt(2);
@@ -170,7 +201,7 @@ public class RedditNLP {
             double language_score = (double) row.getDouble(6);
             double token_count = (double) row.getLong(7);
 
-            double[] features = {year, month, day, hour, tfidf, language_score, token_count};
+            double[] features = {year, month, day, hour, tfidf, tfidfScore, language_score, token_count};
             return new Tuple2<>(label, features);
         });
 
