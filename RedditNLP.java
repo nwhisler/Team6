@@ -64,7 +64,8 @@ public class RedditNLP {
 
         JavaRDD<Row> rows = indexed_df.select("id", "text", "year", "month", "day", "hour", "subredditIndex", "score", "language_score", "token_count").toJavaRDD();
 
-        JavaPairRDD<String,String[]> tokens = rows.mapToPair(s -> new Tuple2(s.get(0),String.valueOf(s.get(1)).replaceAll("\\?\\!\\.\\,\\-","").split(" ")));
+        JavaPairRDD<String,String[]> tokens = rows.mapToPair(s ->
+                new Tuple2(s.get(0),String.valueOf(s.get(1)).replaceAll("[^a-zA-Z0-9]","").toLowerCase().split(" ")));
 
         JavaRDD<HashMap<String,Double>> tf_mapper = tokens.map(s -> {
             String document_id = s._1();
@@ -123,7 +124,7 @@ public class RedditNLP {
 
         JavaPairRDD<String,Long> tokensScore = rows2.flatMapToPair(s -> {
             List<Tuple2<String, Long>> results = new ArrayList<>();
-            for(String word : String.valueOf(s.get(0)).replaceAll("\\?\\!\\.\\,\\-","").split(" ")) {
+            for(String word : String.valueOf(s.get(0)).replaceAll("[^a-zA-Z0-9]","").toLowerCase().split(" ")) {
                 results.add(new Tuple2<>(word, s.getLong(1)));
             }
             return results.iterator();
@@ -172,13 +173,14 @@ public class RedditNLP {
         JavaPairRDD<String, Double> TFIDFScore = TFIDF.mapToPair(s -> {
             String[] parts = s._1().split(" ");
             return new Tuple2<>(parts[0], new Tuple2<>(parts[1], s._2()));
-        }).join(tokenAveScore).mapToPair(s -> new Tuple2<>(s._1() + " " + s._2()._1()._1(), s._2()._1()._2() * s._2()._2()));
+        }).join(tokenAveScore).mapToPair(s -> new Tuple2<>(s._1() + " " + s._2()._1()._1(), s._2()._2()));
         // TFIDFScore.saveAsTextFile("CS435Project/TFIDFScore");
         JavaPairRDD<String, Double> docTfidfScoreSums = TFIDFScore.mapToPair(entry -> {
                     String[] parts = entry._1().split(" ");
                     String docID = parts[1];
                     return new Tuple2<>(docID, entry._2());
                 }).reduceByKey(Double::sum);
+        // docTfidfScoreSums.saveAsTextFile("CS435Project/docTfidfScoreSums");
 
 
 
@@ -191,7 +193,7 @@ public class RedditNLP {
         JavaPairRDD<Double, double[]> feature_pairs = joinedRows.mapToPair(s -> {
             Row row = s._2()._1()._1();
             double tfidf = s._2()._1()._2();
-            double tfidfScore = s._2()._2();
+            double tfidfScore = s._2()._2()/ (double) row.getLong(7);
 
             double label = (double) row.getLong(1);
             double year = (double) row.getInt(2);
